@@ -1,64 +1,95 @@
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createClient } from "@supabase/supabase-js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, "..");
-export const DATA_DIR = path.join(ROOT, "data");
-export const UPLOADS_DIR = path.join(ROOT, "uploads");
-export const DB_PATH = path.join(DATA_DIR, "db.json");
 
-function emptyDb() {
-  return { expedientes: [] };
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+const BUCKET = process.env.SUPABASE_BUCKET || "uploads";
+const TABLE = "expedientes";
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Faltan SUPABASE_URL y/o SUPABASE_SERVICE_ROLE_KEY en las variables de entorno (backend/.env)");
 }
 
-export function ensureDirs() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, JSON.stringify(emptyDb(), null, 2), "utf8");
-  }
+export const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+function check(error, ctx) {
+  if (error) throw new Error(`Supabase (${ctx}): ${error.message}`);
 }
 
-export function readDb() {
-  ensureDirs();
-  try {
-    return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-  } catch {
-    return emptyDb();
-  }
+// ---------------------------------------------------------------- expedientes
+
+export async function listExpedientes() {
+  const { data, error } = await supabase.from(TABLE).select("data").order("actualizado_en", { ascending: false });
+  check(error, "listar expedientes");
+  return data.map((r) => r.data);
 }
 
-export function writeDb(db) {
-  ensureDirs();
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+export async function getExpediente(id) {
+  const { data, error } = await supabase.from(TABLE).select("data").eq("id", id).maybeSingle();
+  check(error, "obtener expediente");
+  return data?.data || null;
 }
 
-export function listExpedientes() {
-  return readDb().expedientes.sort((a, b) => String(b.actualizadoEn).localeCompare(String(a.actualizadoEn)));
-}
-
-export function getExpediente(id) {
-  return readDb().expedientes.find((e) => e.id === id) || null;
-}
-
-export function upsertExpediente(exp) {
-  const db = readDb();
-  const i = db.expedientes.findIndex((e) => e.id === exp.id);
-  if (i >= 0) db.expedientes[i] = exp;
-  else db.expedientes.push(exp);
-  writeDb(db);
+export async function upsertExpediente(exp) {
+  const { error } = await supabase.from(TABLE).upsert({ id: exp.id, data: exp });
+  check(error, "guardar expediente");
   return exp;
 }
 
-export function removeExpediente(id) {
-  const db = readDb();
-  db.expedientes = db.expedientes.filter((e) => e.id !== id);
-  writeDb(db);
+export async function removeExpediente(id) {
+  const { error } = await supabase.from(TABLE).delete().eq("id", id);
+  check(error, "eliminar expediente");
 }
 
-export function uploadDir(expedienteId) {
-  const dir = path.join(UPLOADS_DIR, expedienteId);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+// ------------------------------------------------------------------- archivos
+// Ruta en el bucket: <expedienteId>/<nombre>
+
+const MIME = {
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+export function mimeDe(name) {
+  return MIME[path.extname(name).toLowerCase()] || "application/octet-stream";
+}
+
+function key(expedienteId, name) {
+  return `${expedienteId}/${path.basename(name)}`;
+}
+
+export async function putFile(expedienteId, name, buffer, contentType = mimeDe(name)) {
+  const { error } = await supabase.storage.from(BUCKET).upload(key(expedienteId, name), buffer, {
+    contentType,
+    upsert: true,
+  });
+  check(error, `subir ${name}`);
+}
+
+/** Devuelve un Buffer o null si no existe. */
+export async function getFile(expedienteId, name) {
+  if (!name) return null;
+  const { data, error } = await supabase.storage.from(BUCKET).download(key(expedienteId, name));
+  if (error) return null;
+  return Buffer.from(await data.arrayBuffer());
+}
+
+export async function removeFile(expedienteId, name) {
+  if (!name) return;
+  await supabase.storage.from(BUCKET).remove([key(expedienteId, name)]);
+}
+
+export async function removeDir(expedienteId) {
+  const { data } = await supabase.storage.from(BUCKET).list(expedienteId, { limit: 1000 });
+  if (data?.length) {
+    await supabase.storage.from(BUCKET).remove(data.map((f) => `${expedienteId}/${f.name}`));
+  }
 }

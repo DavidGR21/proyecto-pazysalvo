@@ -1,9 +1,19 @@
-import fs from "node:fs";
 import path from "node:path";
 import { PDFDocument as PDFLibDocument } from "pdf-lib";
 import PDFKit from "pdfkit";
 import { calcularLiquidacion, fechaLarga, fmtMoney, pazSalvoCompleto } from "./liquidacion.js";
-import { uploadDir } from "./store.js";
+import { getFile, putFile } from "./store.js";
+
+/** Convierte un documento PDFKit en Buffer. */
+function toBuffer(doc) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+    doc.end();
+  });
+}
 
 const NAVY = "#0f2744";
 const GOLD = "#b8860b";
@@ -42,14 +52,10 @@ function check(doc, x, y, estado) {
   }
 }
 
-export function generarPazYSalvo(exp) {
+export async function generarPazYSalvo(exp) {
   const calc = calcularLiquidacion(exp);
-  const dir = uploadDir(exp.id);
   const fileName = `paz-y-salvo-${exp.codigo}.pdf`;
-  const filePath = path.join(dir, fileName);
   const doc = new PDFKit({ size: "A4", margin: 40 });
-  const stream = fs.createWriteStream(filePath);
-  doc.pipe(stream);
 
   headerBox(
     doc,
@@ -137,21 +143,15 @@ export function generarPazYSalvo(exp) {
     { width: 515, align: "center" }
   );
 
-  doc.end();
-  return new Promise((resolve, reject) => {
-    stream.on("finish", () => resolve({ filePath, fileName }));
-    stream.on("error", reject);
-  });
+  const buffer = await toBuffer(doc);
+  await putFile(exp.id, fileName, buffer, "application/pdf");
+  return { fileName, buffer };
 }
 
-export function generarLiquidacionPdf(exp) {
+export async function generarLiquidacionPdf(exp) {
   const calc = calcularLiquidacion(exp);
-  const dir = uploadDir(exp.id);
   const fileName = `liquidacion-${exp.codigo}.pdf`;
-  const filePath = path.join(dir, fileName);
   const doc = new PDFKit({ size: "A4", margin: 40 });
-  const stream = fs.createWriteStream(filePath);
-  doc.pipe(stream);
 
   headerBox(doc, "LIQUIDACIÓN DE HABERES", `${exp.empleador.razonSocial}  ·  Talento Humano`);
 
@@ -253,17 +253,14 @@ export function generarLiquidacionPdf(exp) {
     { width: 515, align: "center" }
   );
 
-  doc.end();
-  return new Promise((resolve, reject) => {
-    stream.on("finish", () => resolve({ filePath, fileName, calculo: calc }));
-    stream.on("error", reject);
-  });
+  const buffer = await toBuffer(doc);
+  await putFile(exp.id, fileName, buffer, "application/pdf");
+  return { fileName, buffer, calculo: calc };
 }
 
-export function generarEvidenciaPdf({ filePath, titulo, cuerpo, pie }) {
+/** Genera un PDF simple y devuelve su Buffer (no lo sube). */
+export function generarEvidenciaPdf({ titulo, cuerpo, pie }) {
   const doc = new PDFKit({ size: "A4", margin: 56 });
-  const stream = fs.createWriteStream(filePath);
-  doc.pipe(stream);
   doc.rect(56, 48, 483, 8).fill(NAVY);
   doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(14).text(titulo, 56, 72, { width: 483, align: "center" });
   doc.moveTo(56, 98).lineTo(539, 98).strokeColor(GOLD).lineWidth(1.2).stroke();
@@ -271,11 +268,7 @@ export function generarEvidenciaPdf({ filePath, titulo, cuerpo, pie }) {
   if (pie) {
     doc.font("Helvetica-Oblique").fontSize(9).fillColor(MUTED).text(pie, 56, 700, { width: 483, align: "center" });
   }
-  doc.end();
-  return new Promise((resolve, reject) => {
-    stream.on("finish", () => resolve(filePath));
-    stream.on("error", reject);
-  });
+  return toBuffer(doc);
 }
 
 export function listarAnexos(exp) {
@@ -300,17 +293,7 @@ export function listarAnexos(exp) {
   return anexos;
 }
 
-function waitPdf(doc, filePath) {
-  const stream = fs.createWriteStream(filePath);
-  doc.pipe(stream);
-  doc.end();
-  return new Promise((resolve, reject) => {
-    stream.on("finish", () => resolve(filePath));
-    stream.on("error", reject);
-  });
-}
-
-async function generarIndiceAnexos(exp, anexos, filePath) {
+async function generarIndiceAnexos(exp, anexos) {
   const doc = new PDFKit({ size: "A4", margin: 48 });
   headerBox(doc, "EXPEDIENTE DE DESVINCULACIÓN — ANEXOS", `${exp.codigo}  ·  ${exp.trabajador.nombres}`);
   doc.font("Helvetica").fontSize(9).fillColor("#222").text(
@@ -340,12 +323,11 @@ async function generarIndiceAnexos(exp, anexos, filePath) {
     doc.font("Helvetica").fontSize(8).fillColor(MUTED).text(item.unidad, 410, y, { width: 135, align: "right" });
     y += 18;
   }
-  return waitPdf(doc, filePath);
+  return toBuffer(doc);
 }
 
-async function appendFileToPdf(merged, filePath) {
-  const data = fs.readFileSync(filePath);
-  const ext = path.extname(filePath).toLowerCase();
+async function appendFileToPdf(merged, data, name) {
+  const ext = path.extname(name).toLowerCase();
   if (ext === ".pdf") {
     const src = await PDFLibDocument.load(data, { ignoreEncryption: true });
     const pages = await merged.copyPages(src, src.getPageIndices());
@@ -384,20 +366,19 @@ async function appendFileToPdf(merged, filePath) {
 export async function generarExpedienteCompleto(exp) {
   const paz = await generarPazYSalvo(exp);
   const liq = await generarLiquidacionPdf(exp);
-  const dir = uploadDir(exp.id);
   const anexos = listarAnexos(exp);
-  const indicePath = path.join(dir, `_indice-${exp.codigo}.pdf`);
-  await generarIndiceAnexos(exp, anexos, indicePath);
+  const indice = await generarIndiceAnexos(exp, anexos);
 
   const merged = await PDFLibDocument.create();
-  const parts = [paz.filePath, liq.filePath, indicePath];
+  await appendFileToPdf(merged, paz.buffer, ".pdf");
+  await appendFileToPdf(merged, liq.buffer, ".pdf");
+  await appendFileToPdf(merged, indice, ".pdf");
   for (const a of anexos) {
-    parts.push(path.join(dir, a.storedName));
-  }
-  for (const p of parts) {
-    if (fs.existsSync(p)) await appendFileToPdf(merged, p);
+    const data = await getFile(exp.id, a.storedName);
+    if (data) await appendFileToPdf(merged, data, a.storedName);
   }
   const fileName = `expediente-completo-${exp.codigo}.pdf`;
-  fs.writeFileSync(path.join(dir, fileName), await merged.save());
-  return { fileName, paz, liq, anexos: anexos.length };
+  const buffer = Buffer.from(await merged.save());
+  await putFile(exp.id, fileName, buffer, "application/pdf");
+  return { fileName, buffer, paz, liq, anexos: anexos.length };
 }

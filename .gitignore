@@ -1,9 +1,25 @@
+# Dependencias y builds
 node_modules/
 dist/
-backend/data/db.json
+.vercel/
+
+# Variables de entorno / secretos (nunca subir)
+.env
+.env.*
+!.env.example
+
+# Datos locales antiguos (ahora viven en Supabase)
+backend/data/
 backend/uploads/
+
+# Generados localmente
 entregables/
 _pdf_preview/
+
+# Varios
 *.log
+npm-debug.log*
 .DS_Store
-.env
+Thumbs.db
+.vscode/
+.idea/

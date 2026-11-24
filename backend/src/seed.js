@@ -4,7 +4,7 @@ import { v4 as uuid } from "uuid";
 import { requisitosIniciales } from "./catalogos.js";
 import { calcularLiquidacion } from "./liquidacion.js";
 import { generarEvidenciaPdf, generarExpedienteCompleto } from "./pdf.js";
-import { ROOT, ensureDirs, getExpediente, upsertExpediente, uploadDir } from "./store.js";
+import { ROOT, getExpediente, putFile, removeDir, upsertExpediente } from "./store.js";
 
 export const CASO_ID = "exp-andina-nunez-2026";
 
@@ -136,23 +136,21 @@ export function casoHipotetico() {
 }
 
 async function crearPdfAdjunto(exp, p) {
-  const dir = uploadDir(exp.id);
   const id = uuid();
   const stored = `${id}.pdf`;
-  const filePath = path.join(dir, stored);
-  await generarEvidenciaPdf({
-    filePath,
+  const buffer = await generarEvidenciaPdf({
     titulo: p.titulo,
     cuerpo: p.cuerpo,
     pie: "Documento ficticio — caso hipotético académico SIGEL / Proyecto Paz y Salvo",
   });
+  await putFile(exp.id, stored, buffer, "application/pdf");
   return {
     id,
     tipo: p.tipo,
     nombreOriginal: p.nombreOriginal,
     storedName: stored,
     mime: "application/pdf",
-    size: fs.statSync(filePath).size,
+    size: buffer.length,
     subidoEn: new Date().toISOString(),
   };
 }
@@ -314,9 +312,8 @@ async function adjuntarEvidencias(exp) {
 }
 
 export async function seedCasoHipotetico() {
-  ensureDirs();
-  if (getExpediente(CASO_ID)) {
-    fs.rmSync(uploadDir(CASO_ID), { recursive: true, force: true });
+  if (await getExpediente(CASO_ID)) {
+    await removeDir(CASO_ID);
   }
 
   const exp = casoHipotetico();
@@ -330,14 +327,20 @@ export async function seedCasoHipotetico() {
     expediente: { fileName: out.fileName, generadoEn: new Date().toISOString(), anexos: out.anexos },
   };
   exp.actualizadoEn = new Date().toISOString();
-  upsertExpediente(exp);
+  await upsertExpediente(exp);
 
-  const entregables = path.join(ROOT, "..", "entregables");
-  fs.mkdirSync(entregables, { recursive: true });
-  const dir = uploadDir(exp.id);
-  fs.copyFileSync(path.join(dir, out.paz.fileName), path.join(entregables, "Certificado_Paz_y_Salvo.pdf"));
-  fs.copyFileSync(path.join(dir, out.liq.fileName), path.join(entregables, "Liquidacion_Laboral.pdf"));
-  fs.copyFileSync(path.join(dir, out.fileName), path.join(entregables, "Expediente_Completo.pdf"));
+  // Copia local de los entregables (solo en tu PC; en Vercel el disco es de solo lectura)
+  if (!process.env.VERCEL) {
+    try {
+      const entregables = path.join(ROOT, "..", "entregables");
+      fs.mkdirSync(entregables, { recursive: true });
+      fs.writeFileSync(path.join(entregables, "Certificado_Paz_y_Salvo.pdf"), out.paz.buffer);
+      fs.writeFileSync(path.join(entregables, "Liquidacion_Laboral.pdf"), out.liq.buffer);
+      fs.writeFileSync(path.join(entregables, "Expediente_Completo.pdf"), out.buffer);
+    } catch (err) {
+      console.warn("No se pudieron copiar los entregables:", err.message);
+    }
+  }
   return exp;
 }
 

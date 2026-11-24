@@ -4,16 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch src/index.js",
-    "start": "node src/index.js",
-    "seed": "node src/seed.js"
+    "dev": "node --env-file-if-exists=.env --watch src/index.js",
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "seed": "node --env-file-if-exists=.env src/seed.js",
+    "importar": "node --env-file-if-exists=.env supabase/importar-db-json.mjs"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "multer": "^2.0.2",
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.16.0",
     "uuid": "^11.1.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
